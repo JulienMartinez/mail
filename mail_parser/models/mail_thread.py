@@ -39,7 +39,7 @@ class MailThread(models.AbstractModel):
                                 if parser.should_be_unique:
                                     domain_vals[parser.field_id.name] = parser.default_value or ''
                             else:
-                                continue  # no default value set on this field
+                                continue
 
                 if model_vals.get('email', False) and message_dict.get('email_from', False):
                     message_dict.update({
@@ -61,19 +61,13 @@ class MailThread(models.AbstractModel):
 
     @api.model
     def _message_route_process(self, message, message_dict, routes):
-        """
-        Method overwrite from
-        URL: https://github.com/odoo/odoo/blob/18.0/addons/mail/models/mail_thread.py (_message_route_process)
-        """
         if not message_dict['message_type'] == 'email':
             return super()._message_route_process(message, message_dict, routes)
         
-        self = self.with_context(attachments_mime_plainxml=True) # import XML attachments as text
-        # postpone setting message_dict.partner_ids after message_post, to avoid double notifications
+        self = self.with_context(attachments_mime_plainxml=True)
         original_partner_ids = message_dict.pop('partner_ids', [])
         thread_id = False
         custom_parser_value = {}
-        # raise UserError(message)
         for model, thread_id, custom_values, user_id, alias in routes or ():
             subtype_id = False
             related_user = self.env['res.users'].browse(user_id)
@@ -102,8 +96,6 @@ class MailThread(models.AbstractModel):
                 if existing_record_id:
                     thread_id = existing_record_id.id
 
-            # disabled subscriptions during message_new/update to avoid having the system user running the
-            # email gateway become a follower of all inbound messages
             ModelCtx = Model
             if alias:
                 if self.env.is_system():
@@ -113,9 +105,7 @@ class MailThread(models.AbstractModel):
                 thread = ModelCtx.browse(thread_id)
                 thread.message_update(message_dict)
             else:
-                # if a new thread is created, parent is irrelevant
                 message_dict.pop('parent_id', None)
-                # Report failure/record success of message creation except if alias is not defined (fallback model case)
                 try:
                     thread = ModelCtx.message_new(message_dict, custom_values)
                 except Exception:
@@ -130,11 +120,7 @@ class MailThread(models.AbstractModel):
                 thread_id = thread.id
                 subtype_id = thread._creation_subtype().id
 
-            # switch to odoobot for all incoming message creation
-            # to have a priviledged archived user so real_author_id is correctly computed
             thread_root = thread.with_user(self.env.ref('base.user_root'))
-            # replies to internal message are considered as notes, but parent message
-            # author is added in recipients to ensure they are notified of a private answer
             parent_message = False
             if message_dict.get('parent_id'):
                 parent_message = self.env['mail.message'].sudo().browse(message_dict['parent_id'])
@@ -148,22 +134,18 @@ class MailThread(models.AbstractModel):
                     subtype_id = self.env['ir.model.data']._xmlid_to_res_id('mail.mt_comment')
 
             post_params = dict(subtype_id=subtype_id, partner_ids=partner_ids, **message_dict)
-            # remove computational values not stored on mail.message and avoid warnings when creating it
             for x in ('from', 'to', 'cc', 'recipients', 'references', 'in_reply_to', 'x_odoo_message_id',
                       'is_bounce', 'bounced_email', 'bounced_message', 'bounced_msg_ids', 'bounced_partner'):
                 post_params.pop(x, None)
             new_msg = False
-            if thread_root._name == 'mail.thread':  # message with parent_id not linked to record
+            if thread_root._name == 'mail.thread':
                 new_msg = thread_root.message_notify(**post_params)
             else:
-                # parsing should find an author independently of user running mail gateway, and ensure it is not odoobot
                 partner_from_found = message_dict.get('author_id') and message_dict['author_id'] != self.env['ir.model.data']._xmlid_to_res_id('base.partner_root')
                 thread_root = thread_root.with_context(from_alias=True, mail_create_nosubscribe=not partner_from_found)
                 new_msg = thread_root.message_post(**post_params)
 
             if new_msg and original_partner_ids:
-                # postponed after message_post, because this is an external message and we don't want to create
-                # duplicate emails due to notifications
                 new_msg.write({'partner_ids': original_partner_ids})
         return thread_id
 
